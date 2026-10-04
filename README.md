@@ -82,6 +82,36 @@ Ombre Brain 是一个开源的 AI 情感记忆系统，给 AI 客户端提供"�
 
 ## 二、Termux 基础环境配置
 
+### 2.0 联网方式（先看这个）
+
+后面的 `pkg`、`pip`、`git clone` 都可能需要访问外网（GitHub、PyPI 等）。按你的 VPN 选一种：
+
+**方式 A：VPN 支持本地代理（推荐）**
+
+v2rayNG、Clash 等都会在手机本地开一个代理端口（v2rayNG 默认 SOCKS5 `10808`、HTTP `10809`，具体看你 VPN 设置里的"本地代理端口"）。Termux 直接走这个端口，**不用在分应用代理里来回切换**：
+
+```bash
+export http_proxy="http://127.0.0.1:10809"
+export https_proxy="http://127.0.0.1:10809"
+export all_proxy="socks5://127.0.0.1:10808"
+```
+
+之后这个 session 里的 `git`、`pip`、`curl`、`pkg` 都会自动走代理。不想用时：
+
+```bash
+unset http_proxy https_proxy all_proxy
+```
+
+> 💡 想每次打开 Termux 自动生效，把上面三行 `export` 追加到 `~/.bashrc`。但**启动服务和 cloudflared 前建议先 `unset`**（或在新 session 里启动），避免本地 `localhost:8000` 请求被代理绕路。
+>
+> 💡 验证是否生效：`curl -I https://github.com`，返回 `HTTP/2 200` 即可。
+
+**方式 B：VPN 不支持本地代理**
+
+只在需要访问外网时，到 VPN 的分应用代理里**临时勾选 Termux**，下载完成后**取消勾选**。
+
+> ⚠️ 无论哪种方式，Termux 都不要长期走 VPN 隧道，否则 cloudflared 会断连（见第四节）。
+
 ### 2.1 换国内镜像源
 
 ```bash
@@ -277,7 +307,7 @@ python server.py
 
 ---
 
-## 四、部署 Cloudflare Tunnel（最难的一关）
+## 四、部署 Cloudflare Tunnel
 
 ### 4.0 获取 Cloudflare Tunnel Token（首次配置）
 
@@ -290,66 +320,36 @@ python server.py
 5. 点 **Next**，进入 **Public Hostname** 配置页：
    - Subdomain：填子域名，如 `ombre`
    - Domain：选你托管在 Cloudflare 的域名
-   - Service：填 `http://ombre-brain:8000`
+   - Service：Type 选 **HTTP**，URL 填 `localhost:8000`
 6. 点 **Save tunnel**，完成后 `https://ombre.你的域名/mcp` 就是最终 MCP 地址
 
-### 4.1 背景说明（为什么要用 proot + Alpine）
+### 4.1 安装 cloudflared
 
-这是整个教程最复杂的部分。核心问题：
-
-- Android 高版本系统（netd 进程）会把所有 DNS 请求劫持到 `[::1]:53`
-- 即使关掉 V2Ray、关掉私人 DNS，劫持依然存在
-- `cloudflared` 启动时需要查询 SRV 类型 DNS 记录，而 `[::1]:53` 不支持 SRV 查询
-- 在 Termux 里怎么设置 `resolv.conf` 都无效，`GODEBUG=netdns=go` 也无效
-
-**最终解决方案：** 通过 `proot-distro` 安装 Alpine Linux 虚拟环境，在虚拟环境里运行 `cloudflared`，DNS 在虚拟化层解析，不受 Android netd 影响。
-
-### 4.2 安装 proot-distro 和 Alpine
-
-新开一个 Termux session（屏幕左边缘向右滑 → NEW SESSION）：
+新开一个 Termux session（屏幕左边缘向右滑 → NEW SESSION），直接装：
 
 ```bash
-pkg install proot-distro
-proot-distro install alpine
+pkg install -y cloudflared
 ```
 
-Alpine 体积很小，下载很快。
-
-### 4.3 进入 Alpine 环境
+装完验证：
 
 ```bash
-proot-distro login alpine
+cloudflared --version
 ```
 
-提示符变成 `localhost:~#` 说明进入成功。
-
-### 4.4 在 Alpine 里下载 cloudflared
-
-```bash
-printf "nameserver 1.1.1.1\noptions use-vc\n" > /etc/resolv.conf
-wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
-chmod +x cloudflared-linux-arm64
-```
-
-> ⚠️ **如果 wget 卡住：** 在 v2rayNG 里把 Termux 相关应用（Termux、Termux:API、Termux:Boot）从分应用代理中去掉，让它们走直连。
-
-### 4.5 添加 hosts 记录
-
-```bash
-echo "127.0.0.1 ombre-brain" >> /etc/hosts
-```
-
-### 4.6 启动 cloudflared
-
-> ⚠️ **V2Ray 注意：** V2Ray 开着时 IPv6 流量会断连。解决方法：在 v2rayNG 分应用设置里，把 Termux、Termux:API、Termux:Boot 三个应用取消勾选（走直连）。
+### 4.2 启动 cloudflared
 
 把 `你的cloudflare Tunnel TOKEN` 替换成你的 token：
 
 ```bash
-CLOUDFLARED_NO_IPV6=1 ./cloudflared-linux-arm64 tunnel run --protocol http2 --token 你的cloudflare Tunnel TOKEN
+CLOUDFLARED_NO_IPV6=1 cloudflared tunnel run --protocol http2 --token 你的cloudflare Tunnel TOKEN
 ```
 
 > ✅ **成功标志：** 看到 `Registered tunnel connection connIndex=0/1/2/3` 并持续稳定没有断开。
+
+> ⚠️ **注意：** cloudflared 连 Cloudflare 的 7844 端口，不走 HTTP 代理，所以 **Termux 不要在 VPN 分应用里勾选**（保持直连）。开着 VPN 的 TUN 模式时 IPv6 会断连，命令里的 `CLOUDFLARED_NO_IPV6=1` 就是为此加的。
+
+> 💡 **如果报 DNS 错误**（`DNS query failed on [::1]:53`）：极少数系统会遇到，见第八节坑2的备用方案。
 
 ---
 
@@ -357,7 +357,7 @@ CLOUDFLARED_NO_IPV6=1 ./cloudflared-linux-arm64 tunnel run --protocol http2 --to
 
 ### 5.1 创建 boot 脚本
 
-回到普通 Termux session（不是 Alpine），把 `你的cloudflare TOKEN` 替换后执行：
+回到 Termux，把 `你的cloudflare TOKEN` 替换后执行：
 
 ```bash
 cat > ~/.termux/boot/start-ombre.sh << 'EOF'
@@ -377,7 +377,7 @@ termux-wake-lock
 sleep 10
 
 while true; do
-  proot-distro login alpine -- sh -c 'printf "nameserver 1.1.1.1\noptions use-vc\n" > /etc/resolv.conf && echo "127.0.0.1 ombre-brain" >> /etc/hosts && CLOUDFLARED_NO_IPV6=1 /root/cloudflared-linux-arm64 tunnel run --protocol http2 --token 你的cloudflare TOKEN'
+  CLOUDFLARED_NO_IPV6=1 cloudflared tunnel run --protocol http2 --token 你的cloudflare TOKEN
   echo "[$(date)] cloudflared stopped, restarting in 10s..."
   sleep 10
 done
@@ -465,9 +465,9 @@ git push
 | 坑 | 现象 | 原因 | 解决方案 |
 |----|------|------|----------|
 | **坑1** config.yaml 解析失败 | `WARNING: Failed to parse config file` | 顶层 key 前有空格，或多行被粘成一行 | 用 `cat > config.yaml << 'EOF'` 方式整块写入 |
-| **坑2** DNS query failed on [::1]:53 | `cloudflared` 一直报 DNS 失败 | Android netd 将所有 DNS 请求劫持到 `[::1]:53`，系统级行为，无法被 resolv.conf 覆盖 | 通过 `proot-distro` 安装 Alpine Linux，在虚拟环境内运行 cloudflared |
-| **坑3** SRV 记录查询返回 server misbehaving | Alpine 里 DNS 可解析，cloudflared 还是报错 | Go 语言 DNS 解析器解析压缩 SRV 记录的已知 bug | 在 `/etc/resolv.conf` 加 `options use-vc`，强制用 TCP 进行 DNS 查询 |
-| **坑4** V2Ray 开启后 cloudflared 断连 | 报 `dial tcp [IPv6地址]:7844: no route to host`，反复重连 | V2Ray TUN 模式不代理 IPv6 流量 | v2rayNG 分应用设置里把 Termux 三个组件移除（走直连）；启动时加 `CLOUDFLARED_NO_IPV6=1` |
+| **坑2** DNS query failed on [::1]:53 | `cloudflared` 一直报 DNS 失败 | 多半是 VPN 影响：VPN 开着（尤其 Termux 被勾选走隧道）时，DNS 会被劫持到 `[::1]:53`，而 `cloudflared` 需要查 SRV 记录，它不支持 | 先确认 Termux 没有在 VPN 分应用里勾选，并且是用 `pkg install cloudflared` 装的；关掉 VPN 或取消勾选后重试。仍报错再用备用方案：`proot-distro` 装 Alpine，在里面运行 cloudflared，并在 `/etc/resolv.conf` 写 `nameserver 1.1.1.1` 和 `options use-vc` |
+| **坑3** 下载/克隆卡住 | `git clone`、`pip install`、`pkg install` 一直转圈 | 国内网络直连 GitHub 等外网不稳 | VPN 支持本地代理的，按 2.0 节设代理环境变量；不支持的，临时在 VPN 里勾选 Termux，下完取消 |
+| **坑4** cloudflared 断连 | 报 `dial tcp [IPv6地址]:7844: no route to host`，反复重连 | VPN 的 TUN 模式不代理 IPv6 流量 | Termux 保持直连（不勾选）；启动时加 `CLOUDFLARED_NO_IPV6=1`（本教程命令已带） |
 | **坑5** pip install 卡住 | 长时间没进度 | 正在编译 C/Rust 扩展，正常现象 | 插电放一边等，15–60 分钟会完成，不要按 CTRL+C |
 | **坑6** cat 命令卡在 `>` 提示符 | 执行 heredoc 后停在 `>` 等待 | 命令还没结束，在等内容输入 | 不想写入按 CTRL+C 取消；内容粘贴完毕输入 `EOF` 回车结束 |
 
@@ -488,7 +488,7 @@ https://你的域名/dashboard     → 记忆管理后台
 
 **重要提醒**
 
-- Termux 三个组件（Termux、Termux:API、Termux:Boot）在下载依赖时可走代理，完成后**必须走直连**，否则 cloudflared 会断
+- Termux 三个组件（Termux、Termux:API、Termux:Boot）**保持直连**（不要在 VPN 分应用里勾选），需要访问外网的下载操作靠本地代理环境变量（见 2.0 节）；不支持本地代理的 VPN 才需要临时勾选
 - 手机重启后打开一次 Termux，等 30 秒，服务自动启动
 - 定期执行 `git push` 备份记忆文件到 GitHub
 
